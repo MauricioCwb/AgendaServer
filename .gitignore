@@ -1,0 +1,13 @@
+target/
+.idea/
+*.iml
+.vscode/
+.env
+uploads/
+
+AgendaServer-Local.cmd
+*.local.cmd
+AgendaServer-Local.ps1
+AgendaServer-Local.properties
+AgendaServer-Database.cmd
+AgendaServer-Database.properties

@@ -1,0 +1,6 @@
+-- Este arquivo foi substituido pelo fluxo automatizado.
+-- Execute Configurar-Banco-PostgreSQL.cmd para criar ou redefinir:
+--   usuario: agenda_app
+--   banco:   agenda
+--
+-- O configurador solicita a senha e valida a conexao antes de finalizar.
