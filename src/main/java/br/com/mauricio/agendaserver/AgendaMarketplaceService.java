@@ -279,9 +279,14 @@ final class AgendaMarketplaceService {
         } catch (SQLException exception) { throw serverError("Não foi possível gerar a notificação.", exception); }
     }
 
-    void candidateDecision(String taskId, String candidateId, String status) {
+    void candidateDecision(String taskId, String candidateId, String status, String serviceLocation) {
         try (Connection connection = connection()) {
-            String text = "APPROVED".equals(status) ? "Sua proposta foi aprovada. Confirme sua participação." : "Sua proposta não foi selecionada.";
+            String locationText = "PROVIDER".equals(serviceLocation)
+                    ? " O atendimento será no seu local."
+                    : " O atendimento será no local originalmente solicitado.";
+            String text = "APPROVED".equals(status)
+                    ? "Sua proposta foi aprovada." + locationText + " Confirme sua participação."
+                    : "Sua proposta não foi selecionada.";
             notify(connection, candidateId, "CANDIDATE_DECISION", "Atualização da proposta", text, taskId);
         } catch (SQLException exception) { throw serverError("Não foi possível gerar a notificação.", exception); }
     }

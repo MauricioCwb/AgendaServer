@@ -1,5 +1,14 @@
 # AgendaServer — Documentação consolidada
 
+## AgendaServer 018 — local negociável e privacidade
+
+- Versão interna: `1.1.13`.
+- O prestador pode aceitar o local original ou sugerir atendimento no próprio local.
+- Antes da aprovação, a API informa somente a distância e não envia coordenadas exatas para a outra parte.
+- O contratante pode aceitar a sugestão ou aprovar o prestador mantendo o local original.
+- Somente após a aprovação o ponto exato do local combinado é liberado para quem precisa se deslocar.
+- O teste de ciclo completo possui dois casos independentes: atendimento no local do prestador e atendimento no local original do solicitante após a sugestão do prestador ser recusada.
+
 ## AgendaServer 017
 
 - Versão interna: `1.1.10`.

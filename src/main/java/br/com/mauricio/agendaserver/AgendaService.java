@@ -144,15 +144,22 @@ final class AgendaService {
                     if (!owner && !applied && !externallyInvited && distance > MAX_DISTANCE_KM) continue;
                     if (!externallyInvited && !marketplace.canViewTask(current.id(), rows.getString("id"), rows.getString("offer_phase"), owner, applied)) continue;
                     LocalDateTime startsAt = rows.getTimestamp("starts_at").toLocalDateTime();
-                    boolean approximateLocation = externallyInvited && !owner && !applied;
-                    double displayLatitude = approximateLocation ? approximateCoordinate(rows.getDouble("latitude")) : rows.getDouble("latitude");
-                    double displayLongitude = approximateLocation ? approximateCoordinate(rows.getDouble("longitude")) : rows.getDouble("longitude");
+                    CandidateLocationAccess locationAccess = owner
+                            ? CandidateLocationAccess.original()
+                            : candidateLocationAccess(connection, rows.getString("id"), current.id());
+                    boolean approximateLocation = !owner && !locationAccess.exact();
+                    double displayLatitude = locationAccess.providerLocation()
+                            ? locationAccess.latitude()
+                            : (approximateLocation ? 0 : rows.getDouble("latitude"));
+                    double displayLongitude = locationAccess.providerLocation()
+                            ? locationAccess.longitude()
+                            : (approximateLocation ? 0 : rows.getDouble("longitude"));
                     tasks.add(new AgendaTask(
                             rows.getString("id"), rows.getString("title"), rows.getString("description"),
                             rows.getString("owner_id"), rows.getString("display_name"),
                             startsAt.format(OUTPUT_DATE), startsAt.format(OUTPUT_TIME),
                             rows.getInt("duration_minutes") / 60.0, rows.getInt("people_needed"),
-                            displayLatitude, displayLongitude, approximateLocation, rows.getString("recurrence_label"),
+                            displayLatitude, displayLongitude, distance, approximateLocation, rows.getString("recurrence_label"),
                             rows.getLong("specialty_id"), rows.getString("specialty_name"),
                             rows.getString("offer_phase"), formatTimestamp(rows.getTimestamp("offer_expires_at")), rows.getString("task_status"),
                             marketplace.offerStatus(current.id(), rows.getString("id")),
@@ -229,8 +236,9 @@ final class AgendaService {
         return findTask(current, firstId, request.latitude(), request.longitude(), baseUrl);
     }
 
-    void apply(AgendaUser current, String taskId, double userLatitude, double userLongitude) {
+    void apply(AgendaUser current, String taskId, double userLatitude, double userLongitude, String requestedLocation) {
         validateCoordinates(userLatitude, userLongitude);
+        String locationProposal = normalizeServiceLocation(requestedLocation);
         marketplace.assertApplicationOpen(taskId, current.id());
         try (Connection connection = connection()) {
             TaskLocation task = taskLocation(connection, taskId);
@@ -242,13 +250,27 @@ final class AgendaService {
             }
             if (approvedCount(connection, taskId) >= task.peopleNeeded()) throw badRequest("Todas as vagas já foram preenchidas.");
             try (PreparedStatement insert = connection.prepareStatement("""
-                    INSERT INTO agenda_candidates(task_id,user_id,status,distance_km)
-                    VALUES(?,?,'PENDING',?)
-                    ON CONFLICT(task_id,user_id) DO UPDATE SET distance_km=EXCLUDED.distance_km, updated_at=CURRENT_TIMESTAMP
+                    INSERT INTO agenda_candidates(task_id,user_id,status,distance_km,location_proposal,proposed_latitude,proposed_longitude,agreed_location)
+                    VALUES(?,?,'PENDING',?,?,?,?, 'ORIGINAL')
+                    ON CONFLICT(task_id,user_id) DO UPDATE SET
+                        distance_km=EXCLUDED.distance_km,
+                        location_proposal=EXCLUDED.location_proposal,
+                        proposed_latitude=EXCLUDED.proposed_latitude,
+                        proposed_longitude=EXCLUDED.proposed_longitude,
+                        agreed_location='ORIGINAL',
+                        updated_at=CURRENT_TIMESTAMP
                     """)) {
                 insert.setString(1, taskId);
                 insert.setString(2, current.id());
                 insert.setDouble(3, distance);
+                insert.setString(4, locationProposal);
+                if ("PROVIDER".equals(locationProposal)) {
+                    insert.setDouble(5, userLatitude);
+                    insert.setDouble(6, userLongitude);
+                } else {
+                    insert.setNull(5, java.sql.Types.DOUBLE);
+                    insert.setNull(6, java.sql.Types.DOUBLE);
+                }
                 insert.executeUpdate();
             }
             marketplace.candidateApplied(taskId, current.id());
@@ -261,6 +283,7 @@ final class AgendaService {
         if (decision == null || !("APPROVED".equals(decision.status()) || "REJECTED".equals(decision.status()))) {
             throw badRequest("Status deve ser APPROVED ou REJECTED.");
         }
+        String serviceLocation = normalizeServiceLocation(decision.serviceLocation());
         try (Connection connection = connection()) {
             TaskLocation task = taskLocation(connection, taskId);
             if (!current.id().equals(task.ownerId())) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Apenas o anunciante pode decidir.");
@@ -268,14 +291,19 @@ final class AgendaService {
                     && !isAlreadyApproved(connection, taskId, candidateId)) {
                 throw badRequest("Todas as vagas já foram preenchidas.");
             }
+            if ("APPROVED".equals(decision.status()) && "PROVIDER".equals(serviceLocation)
+                    && !hasProviderLocationProposal(connection, taskId, candidateId)) {
+                throw badRequest("O candidato não sugeriu atendimento no local dele.");
+            }
             try (PreparedStatement update = connection.prepareStatement(
-                    "UPDATE agenda_candidates SET status=?, updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND user_id=?")) {
+                    "UPDATE agenda_candidates SET status=?, agreed_location=?, updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND user_id=?")) {
                 update.setString(1, decision.status());
-                update.setString(2, taskId);
-                update.setString(3, candidateId);
+                update.setString(2, "APPROVED".equals(decision.status()) ? serviceLocation : "ORIGINAL");
+                update.setString(3, taskId);
+                update.setString(4, candidateId);
                 if (update.executeUpdate() == 0) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Candidato não encontrado.");
             }
-            marketplace.candidateDecision(taskId, candidateId, decision.status());
+            marketplace.candidateDecision(taskId, candidateId, decision.status(), serviceLocation);
         } catch (SQLException exception) {
             throw serverError("Não foi possível atualizar a candidatura.", exception);
         }
@@ -489,7 +517,8 @@ final class AgendaService {
     private List<CandidateInfo> candidates(Connection connection, String taskId, String currentUserId, boolean owner) throws SQLException {
         List<CandidateInfo> result = new ArrayList<>();
         String sql = """
-                SELECT c.user_id,u.display_name,u.bio,c.distance_km,c.status
+                SELECT c.user_id,u.display_name,u.bio,c.distance_km,c.status,c.location_proposal,c.agreed_location,
+                       c.proposed_latitude,c.proposed_longitude
                 FROM agenda_candidates c JOIN agenda_users u ON u.id=c.user_id
                 WHERE c.task_id=?
                 """ + (owner ? " ORDER BY c.created_at" : " AND c.user_id=?");
@@ -497,10 +526,18 @@ final class AgendaService {
             query.setString(1, taskId);
             if (!owner) query.setString(2, currentUserId);
             try (ResultSet rows = query.executeQuery()) {
-                while (rows.next()) result.add(new CandidateInfo(
-                        rows.getString("user_id"), rows.getString("display_name"),
-                        rows.getString("bio"),rows.getDouble("distance_km"), rows.getString("status"),
-                        marketplace.pricesFor(rows.getString("user_id"))));
+                while (rows.next()) {
+                    boolean revealProviderLocation = owner
+                            && ("APPROVED".equals(rows.getString("status")) || "CONFIRMED".equals(rows.getString("status")))
+                            && "PROVIDER".equals(rows.getString("agreed_location"));
+                    result.add(new CandidateInfo(
+                            rows.getString("user_id"), rows.getString("display_name"),
+                            rows.getString("bio"), rows.getDouble("distance_km"), rows.getString("status"),
+                            rows.getString("location_proposal"), rows.getString("agreed_location"),
+                            revealProviderLocation ? rows.getObject("proposed_latitude", Double.class) : null,
+                            revealProviderLocation ? rows.getObject("proposed_longitude", Double.class) : null,
+                            marketplace.pricesFor(rows.getString("user_id"))));
+                }
             }
         }
         return result;
@@ -546,6 +583,39 @@ final class AgendaService {
         try (PreparedStatement query = connection.prepareStatement(
                 "SELECT 1 FROM agenda_candidates WHERE task_id=? AND user_id=? AND status IN ('APPROVED','CONFIRMED')")) {
             query.setString(1, taskId); query.setString(2, userId);
+            try (ResultSet rows = query.executeQuery()) { return rows.next(); }
+        }
+    }
+
+    private CandidateLocationAccess candidateLocationAccess(Connection connection, String taskId, String userId) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT status,agreed_location,proposed_latitude,proposed_longitude
+                FROM agenda_candidates WHERE task_id=? AND user_id=?
+                """)) {
+            query.setString(1, taskId);
+            query.setString(2, userId);
+            try (ResultSet rows = query.executeQuery()) {
+                if (!rows.next()) return CandidateLocationAccess.approximate();
+                boolean accepted = "APPROVED".equals(rows.getString("status")) || "CONFIRMED".equals(rows.getString("status"));
+                if (!accepted) return CandidateLocationAccess.approximate();
+                if ("PROVIDER".equals(rows.getString("agreed_location"))) {
+                    Double latitude = rows.getObject("proposed_latitude", Double.class);
+                    Double longitude = rows.getObject("proposed_longitude", Double.class);
+                    if (latitude != null && longitude != null) return CandidateLocationAccess.provider(latitude, longitude);
+                }
+                return CandidateLocationAccess.original();
+            }
+        }
+    }
+
+    private boolean hasProviderLocationProposal(Connection connection, String taskId, String userId) throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement("""
+                SELECT 1 FROM agenda_candidates
+                WHERE task_id=? AND user_id=? AND location_proposal='PROVIDER'
+                      AND proposed_latitude IS NOT NULL AND proposed_longitude IS NOT NULL
+                """)) {
+            query.setString(1, taskId);
+            query.setString(2, userId);
             try (ResultSet rows = query.executeQuery()) { return rows.next(); }
         }
     }
@@ -680,8 +750,12 @@ final class AgendaService {
             throw badRequest("Coordenadas inválidas.");
     }
 
-    private static double approximateCoordinate(double value) {
-        return Math.round(value * 100.0) / 100.0;
+    private static String normalizeServiceLocation(String value) {
+        String normalized = value == null ? "ORIGINAL" : value.trim().toUpperCase(Locale.ROOT);
+        if (!("ORIGINAL".equals(normalized) || "PROVIDER".equals(normalized))) {
+            throw badRequest("O local do serviço deve ser ORIGINAL ou PROVIDER.");
+        }
+        return normalized;
     }
 
     static double distanceKm(double lat1, double lon1, double lat2, double lon2) {
@@ -701,14 +775,19 @@ final class AgendaService {
                              int peopleNeeded, double latitude, double longitude, String recurrenceType,
                              List<Integer> recurrenceDays, String recurrenceUntil, List<String> favoriteProviderIds,
                              long specialtyId) {}
-    record CandidateDecision(String status) {
-        CandidateDecision { status = status == null ? "" : status.trim().toUpperCase(Locale.ROOT); }
+    record CandidateDecision(String status, String serviceLocation) {
+        CandidateDecision {
+            status = status == null ? "" : status.trim().toUpperCase(Locale.ROOT);
+            serviceLocation = serviceLocation == null ? "ORIGINAL" : serviceLocation.trim().toUpperCase(Locale.ROOT);
+        }
     }
     record CandidateInfo(String userId, String name, String bio,double distanceKm, String status,
+                         String locationProposal, String agreedLocation,
+                         Double serviceLatitude, Double serviceLongitude,
                          List<AgendaMarketplaceService.ServicePrice> prices) {}
     record AgendaTask(String id, String title, String description, String ownerId, String ownerName,
                       String date, String time, double durationHours, int peopleNeeded,
-                      double latitude, double longitude, boolean locationApproximate, String recurrenceLabel,
+                       double latitude, double longitude, double distanceKm, boolean locationApproximate, String recurrenceLabel,
                       long specialtyId, String specialtyName,
                       String offerPhase, String offerExpiresAt, String taskStatus,
                       String myOfferStatus,
@@ -718,6 +797,13 @@ final class AgendaService {
     record VideoInfo(String id,String url,int order) {}
     record PhotoFile(Path path, String mimeType) {}
     private record TaskLocation(String ownerId, double latitude, double longitude, int peopleNeeded) {}
+    private record CandidateLocationAccess(boolean exact, boolean providerLocation, double latitude, double longitude) {
+        static CandidateLocationAccess approximate() { return new CandidateLocationAccess(false, false, 0, 0); }
+        static CandidateLocationAccess original() { return new CandidateLocationAccess(true, false, 0, 0); }
+        static CandidateLocationAccess provider(double latitude, double longitude) {
+            return new CandidateLocationAccess(true, true, latitude, longitude);
+        }
+    }
     private record ImageType(String mimeType, String extension) {}
     private record VideoType(String mimeType,String extension) {}
     private record Account(String userId, String email, String name) {}

@@ -59,7 +59,17 @@ public class AgendaFullLifecycleIT {
     private String baseUrl;
 
     @Test
-    void executesCompleteConsumerProviderLifecycleAndRemovesEveryCreatedRecord() throws Exception {
+    void executesCompleteLifecycleAtProviderLocationAndRemovesEveryCreatedRecord() throws Exception {
+        executeCompleteLifecycle("PROVIDER");
+    }
+
+    @Test
+    void executesCompleteLifecycleAtRequesterLocationWhenProviderSuggestionIsRefusedAndRemovesEveryCreatedRecord()
+            throws Exception {
+        executeCompleteLifecycle("ORIGINAL");
+    }
+
+    private void executeCompleteLifecycle(String agreedLocation) throws Exception {
         if (isPortOpen(28212)) {
             throw new IllegalStateException(
                     "Encerre o AgendaServer da porta 28212 antes de executar o teste completo.");
@@ -125,13 +135,21 @@ public class AgendaFullLifecycleIT {
             JsonNode providerTasks = loadTasks(provider, -23.5016, -47.4525);
             assertTrue(containsTask(providerTasks, taskId),
                     "A atividade criada não apareceu para o prestador dentro do raio permitido.");
+            JsonNode providerTaskBeforeApplication = taskById(providerTasks, taskId);
+            assertTrue(providerTaskBeforeApplication.path("locationApproximate").asBoolean(),
+                    "O local exato foi exposto antes da aprovação.");
+            assertEquals(0, providerTaskBeforeApplication.path("latitude").asDouble(), 0.0,
+                    "Nenhuma coordenada do pedido deve ser enviada antes da aprovação.");
 
             printPhase("6/10", "Prestador enviando a proposta");
             postJson("/api/agenda/tasks/" + taskId
-                            + "/candidates?latitude=-23.5016&longitude=-47.4525",
+                            + "/candidates?latitude=-23.5016&longitude=-47.4525&locationProposal=PROVIDER",
                     null, provider, 200);
             assertEquals("PENDING", text(
                     "SELECT status FROM agenda_candidates WHERE task_id=? AND user_id=?",
+                    taskId, provider.userId()));
+            assertEquals("PROVIDER", text(
+                    "SELECT location_proposal FROM agenda_candidates WHERE task_id=? AND user_id=?",
                     taskId, provider.userId()));
             assertEquals(1, count("""
                     SELECT COUNT(*) FROM agenda_notifications
@@ -145,13 +163,30 @@ public class AgendaFullLifecycleIT {
             assertEquals(1, ownerTaskAfterApplication.path("candidates").size());
             assertEquals("PENDING",
                     ownerTaskAfterApplication.path("candidates").get(0).path("status").asText());
+            assertEquals("PROVIDER",
+                    ownerTaskAfterApplication.path("candidates").get(0).path("locationProposal").asText());
+            assertTrue(ownerTaskAfterApplication.path("candidates").get(0).path("serviceLatitude").isNull(),
+                    "O local do prestador foi exposto antes da aprovação.");
 
-            printPhase("7/10", "Consumidor aprovando a proposta");
+            printPhase("7/10", "Consumidor aprovando a proposta no local "
+                    + ("PROVIDER".equals(agreedLocation) ? "do prestador" : "original do pedido"));
             putJson("/api/agenda/tasks/" + taskId + "/candidates/" + provider.userId(),
-                    Map.of("status", "APPROVED"), consumer, 200);
+                    Map.of("status", "APPROVED", "serviceLocation", agreedLocation), consumer, 200);
             assertEquals("APPROVED", text(
                     "SELECT status FROM agenda_candidates WHERE task_id=? AND user_id=?",
                     taskId, provider.userId()));
+            assertEquals(agreedLocation, text(
+                    "SELECT agreed_location FROM agenda_candidates WHERE task_id=? AND user_id=?",
+                    taskId, provider.userId()));
+            JsonNode ownerTaskAfterDecision = taskById(loadTasks(consumer, -23.5015, -47.4526), taskId);
+            JsonNode ownerCandidateAfterDecision = ownerTaskAfterDecision.path("candidates").get(0);
+            if ("PROVIDER".equals(agreedLocation)) {
+                assertEquals(-23.5016, ownerCandidateAfterDecision.path("serviceLatitude").asDouble(), 0.000001,
+                        "O solicitante deve receber o local exato do prestador após aceitá-lo.");
+            } else {
+                assertTrue(ownerCandidateAfterDecision.path("serviceLatitude").isNull(),
+                        "O local do prestador deve permanecer oculto quando a sugestão for recusada.");
+            }
             assertEquals(1, count("""
                     SELECT COUNT(*) FROM agenda_notifications
                     WHERE user_id=? AND task_id=? AND type='CANDIDATE_DECISION'
@@ -165,6 +200,9 @@ public class AgendaFullLifecycleIT {
                     "A notificação aponta para uma atividade que o prestador não consegue abrir.");
             assertEquals("APPROVED",
                     providerApprovedTask.path("candidates").get(0).path("status").asText());
+            assertFalse(providerApprovedTask.path("locationApproximate").asBoolean());
+            double expectedServiceLatitude = "PROVIDER".equals(agreedLocation) ? -23.5016 : -23.5015;
+            assertEquals(expectedServiceLatitude, providerApprovedTask.path("latitude").asDouble(), 0.000001);
 
             printPhase("9/10", "Prestador confirmando a participação aprovada");
             postJson("/api/agenda/tasks/" + taskId + "/participation-response",

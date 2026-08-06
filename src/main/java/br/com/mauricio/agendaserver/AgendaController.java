@@ -136,8 +136,9 @@ public final class AgendaController {
             @RequestHeader(TOKEN_HEADER) String authToken,
             @PathVariable String taskId,
             @RequestParam double latitude,
-            @RequestParam double longitude) {
-        service.apply(service.authenticate(deviceId, authToken), taskId, latitude, longitude);
+            @RequestParam double longitude,
+            @RequestParam(defaultValue = "ORIGINAL") String locationProposal) {
+        service.apply(service.authenticate(deviceId, authToken), taskId, latitude, longitude, locationProposal);
         return Map.of("status", "PENDING");
     }
 
