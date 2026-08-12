@@ -11,6 +11,26 @@ set "AGENDA_PROSPECTING_DRY_RUN=true"
 set "AGENDA_AUTOMATIC_DRY_RUN_ENABLED=true"
 set "AGENDA_EMAIL_SENDING_ENABLED=false"
 set "AGENDA_CNPJ_IMPORT_DIR=C:\Dados\ReceitaCNPJ"
+
+rem Busca externa por IA: raciocínio local no Ollama + busca web oficial do Ollama.
+set "AGENDA_AI_SEARCH_ENABLED=true"
+set "AGENDA_OLLAMA_BASE_URL=http://localhost:11434"
+set "AGENDA_OLLAMA_MODEL="
+set "OLLAMA_API_KEY="
+rem Fallback opcional. Se OPENAI_API_KEY já estiver preenchida acima, será reutilizada.
+set "AGENDA_AI_OPENAI_FALLBACK_ENABLED=false"
+set "AGENDA_AI_OPENAI_MODEL=gpt-5.1"
+set "AGENDA_AI_FALLBACK_MIN_CANDIDATES=5"
+set "AGENDA_AI_MAX_QUERIES=3"
+set "AGENDA_AI_MAX_RESULTS_PER_QUERY=6"
+set "AGENDA_AI_MAX_PAGES=8"
+
+rem Rodadas de contato: nunca mais de 5 por pedido de uma vez.
+set "AGENDA_CONTACT_ROUND_SIZE=5"
+set "AGENDA_RESPONSE_BUSINESS_HOURS=2"
+set "AGENDA_BUSINESS_START=09:00"
+set "AGENDA_BUSINESS_END=18:00"
+set "AGENDA_BUSINESS_ZONE=America/Sao_Paulo"
 set "AGENDA_GEOCODER_PROVIDER=mock"
 set "AGENDA_GEOCODER_URL="
 set "AGENDA_GEOCODER_API_KEY="

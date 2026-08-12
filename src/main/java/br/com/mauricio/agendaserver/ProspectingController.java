@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -27,17 +28,20 @@ public final class ProspectingController {
     private final ProspectingService prospecting;
     private final CnpjImportService imports;
     private final ProspectingSettingsService settings;
+    private final AiProspectingService aiProspecting;
     private final ProspectingProcessLogService processLogs;
 
     public ProspectingController(AgendaService agenda, AdminAuthorizationService admins, SpecialtyService specialties,
                           ProspectingService prospecting, CnpjImportService imports,
-                          ProspectingSettingsService settings, ProspectingProcessLogService processLogs) {
+                          ProspectingSettingsService settings, AiProspectingService aiProspecting,
+                          ProspectingProcessLogService processLogs) {
         this.agenda = agenda;
         this.admins = admins;
         this.specialties = specialties;
         this.prospecting = prospecting;
         this.imports = imports;
         this.settings = settings;
+        this.aiProspecting = aiProspecting;
         this.processLogs = processLogs;
     }
 
@@ -151,6 +155,17 @@ public final class ProspectingController {
         return imports.start(user.id(), body);
     }
 
+    @PostMapping("/admin/cnpj-imports/full")
+    public CnpjImportService.ImportRun startFullCatalogImport(@RequestHeader(DEVICE_HEADER) String deviceId,
+                                                        @RequestHeader(TOKEN_HEADER) String authToken,
+                                                        @RequestBody CnpjImportService.ImportRequest body) {
+        AgendaService.AgendaUser user = agenda.authenticate(deviceId, authToken);
+        admins.requireAdmin(user);
+        CnpjImportService.ImportRequest full = new CnpjImportService.ImportRequest(
+                body == null ? null : body.sourceVersion(), body == null ? null : body.sourceDate(), "FULL_CATALOG");
+        return imports.start(user.id(), full);
+    }
+
     @GetMapping("/admin/cnpj-imports")
     public List<CnpjImportService.ImportRun> listImports(@RequestHeader(DEVICE_HEADER) String deviceId,
                                                   @RequestHeader(TOKEN_HEADER) String authToken) {
@@ -178,7 +193,7 @@ public final class ProspectingController {
     public Map<String, Object> settings(@RequestHeader(DEVICE_HEADER) String deviceId,
                                  @RequestHeader(TOKEN_HEADER) String authToken) {
         admins.requireSettingsAdmin(agenda.authenticate(deviceId, authToken));
-        return settings.adminView();
+        return adminSettingsView();
     }
 
     @PutMapping("/admin/prospecting/settings")
@@ -188,7 +203,7 @@ public final class ProspectingController {
         AgendaService.AgendaUser user = agenda.authenticate(deviceId, authToken);
         admins.requireSettingsAdmin(user);
         settings.updateEditable(user.id(), body);
-        return settings.adminView();
+        return adminSettingsView();
     }
 
     @PostMapping("/admin/tasks/{taskId}/prospecting/simulate")
@@ -237,6 +252,12 @@ public final class ProspectingController {
                                                            @RequestHeader(TOKEN_HEADER) String authToken) {
         admins.requireAdmin(agenda.authenticate(deviceId, authToken));
         return prospecting.suppressions();
+    }
+
+    private Map<String, Object> adminSettingsView() {
+        Map<String, Object> result = new LinkedHashMap<>(settings.adminView());
+        result.putAll(aiProspecting.adminView());
+        return result;
     }
 
     record SpecialtySelection(List<Long> specialtyIds) {}

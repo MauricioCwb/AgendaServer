@@ -1143,3 +1143,68 @@ O script `Testar-Fluxo-Completo.cmd` executa `mvn clean` antes do teste para eli
 classes antigas de `target/test-classes`. O antigo `Testar.cmd` genérico foi removido
 e também é apagado automaticamente pelo `Limpar-Projeto.ps1` quando ainda existir
 em uma instalação atualizada por sobreposição.
+
+# Atualização — catálogo CNPJ/CNAE completo, Ollama e rodadas de 5
+
+## Pesquisa externa híbrida
+
+A busca externa passa a combinar três camadas sem acoplar o restante do Agenda ao provedor de IA:
+
+1. **Catálogo CNPJ/CNAE local**: fonte prioritária para consultas rápidas e determinísticas.
+2. **Ollama local + Web Search**: complementa o pool quando a base local não entrega candidatos suficientes. O modelo local cria consultas e extrai candidatos em JSON estruturado.
+3. **OpenAI como fallback opcional**: só é acionada quando configurada e o resultado anterior fica abaixo do mínimo definido.
+
+Os candidatos descobertos pela web são gravados separadamente em `agenda_web_prospects`. A tabela `agenda_external_invitations` referencia exatamente uma origem: `agenda_cnpj_prospects` ou `agenda_web_prospects`.
+
+Variáveis principais:
+
+- `AGENDA_AI_SEARCH_ENABLED=true`;
+- `AGENDA_OLLAMA_BASE_URL=http://localhost:11434`;
+- `AGENDA_OLLAMA_MODEL` (vazio = detecção automática entre modelos instalados);
+- `OLLAMA_API_KEY` para o Web Search oficial do Ollama;
+- `AGENDA_AI_OPENAI_FALLBACK_ENABLED=false` por padrão, para impedir custo acidental;
+- `OPENAI_API_KEY` opcional para fallback quando essa chave for ativada;
+- `AGENDA_AI_OPENAI_MODEL`;
+- `AGENDA_AI_FALLBACK_MIN_CANDIDATES=5`.
+
+## Carga integral CNPJ + CNAE
+
+`POST /api/agenda/admin/cnpj-imports` aceita o novo campo `mode`:
+
+```json
+{
+  "sourceVersion": "Receita CNPJ 2026-08",
+  "sourceDate": "2026-08-01",
+  "mode": "FULL_CATALOG"
+}
+```
+
+`FULL_CATALOG` percorre todos os arquivos `Estabelecimentos*.zip` disponíveis no diretório configurado e persiste todos os CNPJs válidos encontrados, independentemente de CNAE, município, situação cadastral ou existência de e-mail. Todos os CNAEs principal/secundários disponíveis são indexados em `agenda_cnpj_catalog_cnaes`. E-mails públicos válidos, quando existirem, permanecem criptografados em repouso.
+
+A carga integral **não cria autorização de contato**. Quando uma demanda precisa de determinado serviço, o Agenda materializa do catálogo apenas os registros que naquele momento satisfazem as regras de CNAE, situação ativa, município piloto e contato/endereço válidos. Depois ainda são aplicados distância, supressão, cooldown e deduplicação. Isso permite adicionar novos CNAEs sem reimportar toda a Receita.
+
+O modo legado `PROSPECTING_ONLY` continua disponível para carregar apenas os registros elegíveis para as especialidades atuais. O modo padrão da nova carga administrativa é `FULL_CATALOG`.
+
+## Rodadas de oportunidade
+
+A seleção pode preparar um pool maior (`AGENDA_PROSPECTING_LIMIT_PER_TASK`, padrão 100), mas o envio é separado do pool:
+
+- no máximo `AGENDA_CONTACT_ROUND_SIZE` contatos são liberados por rodada; o código limita esse valor tecnicamente a **5**;
+- os candidatos das próximas rodadas ficam com status `WAITING_ROUND`;
+- após uma rodada, o job entra em `WAITING_RESPONSE`;
+- se não ocorrer resposta positiva em `AGENDA_RESPONSE_BUSINESS_HOURS` (padrão **2 horas úteis**), a próxima rodada de até 5 é liberada;
+- um cadastro realizado por convite é considerado resposta positiva e muda o job para `RESPONDED`; filas futuras são canceladas com `CANCELLED_RESPONSE`;
+- o mesmo e-mail não volta a ser usado na mesma tarefa, e supressão/cooldown continuam obrigatórios;
+- quando não existem candidatos adicionais, o job termina em `EXHAUSTED`.
+
+A janela útil padrão é segunda a sexta, 09:00–18:00, fuso `America/Sao_Paulo`. Feriados ainda não fazem parte do cálculo; podem ser adicionados posteriormente por calendário configurável.
+
+## Migração V9
+
+`V9__ai_search_full_cnpj_catalog_and_contact_rounds.sql` cria:
+
+- `agenda_cnpj_catalog`;
+- `agenda_cnpj_catalog_cnaes`;
+- `agenda_web_prospects`;
+- campos de origem web e número da rodada em `agenda_external_invitations`;
+- `current_round`, `next_round_at`, `ai_provider` e `ai_candidates_count` nos jobs.

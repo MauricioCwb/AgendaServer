@@ -9,13 +9,19 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ProspectingRulesTest {
-    @Test void capsAndDeduplicatesAtTwenty() {
+    @Test void clampsPerTaskLimitToSafeBounds() {
+        assertEquals(1, ProspectingRules.perTaskLimit(0));
+        assertEquals(100, ProspectingRules.perTaskLimit(100));
+        assertEquals(500, ProspectingRules.perTaskLimit(999));
+    }
+
+    @Test void respectsConfiguredPoolAndDeduplicates() {
         List<String> values = new ArrayList<>();
-        for (int index = 0; index < 30; index++) values.add("email" + index);
+        for (int index = 0; index < 120; index++) values.add("email" + index);
         values.add("email1");
         List<String> selected = ProspectingRules.distinctLimited(values, value -> value, 100);
-        assertEquals(20, selected.size());
-        assertEquals(20, selected.stream().distinct().count());
+        assertEquals(100, selected.size());
+        assertEquals(100, selected.stream().distinct().count());
     }
 
     @Test void respectsDailyAllowance() {

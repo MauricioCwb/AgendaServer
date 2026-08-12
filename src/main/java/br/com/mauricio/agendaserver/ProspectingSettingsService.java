@@ -12,6 +12,8 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.time.LocalTime;
+import java.time.ZoneId;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -27,6 +29,11 @@ final class ProspectingSettingsService {
     private final int dailyLimit;
     private final int cooldownDays;
     private final int tokenHours;
+    private final int contactRoundSize;
+    private final int responseBusinessHours;
+    private final LocalTime businessStart;
+    private final LocalTime businessEnd;
+    private final String businessZone;
     private final Path importDir;
     private final String geocoderProvider;
     private final String geocoderUrl;
@@ -48,10 +55,15 @@ final class ProspectingSettingsService {
             @Value("${agenda.prospecting.enabled:false}") boolean enabled,
             @Value("${agenda.prospecting.dry-run:true}") boolean dryRun,
             @Value("${agenda.prospecting.radius-km:2}") double radiusKm,
-            @Value("${agenda.prospecting.limit-per-task:20}") int perTaskLimit,
-            @Value("${agenda.prospecting.daily-limit:5}") int dailyLimit,
+            @Value("${agenda.prospecting.limit-per-task:100}") int perTaskLimit,
+            @Value("${agenda.prospecting.daily-limit:100}") int dailyLimit,
             @Value("${agenda.prospecting.cooldown-days:90}") int cooldownDays,
             @Value("${agenda.prospecting.token-hours:72}") int tokenHours,
+            @Value("${agenda.prospecting.contact-round-size:5}") int contactRoundSize,
+            @Value("${agenda.prospecting.response-business-hours:2}") int responseBusinessHours,
+            @Value("${agenda.prospecting.business-start:09:00}") String businessStart,
+            @Value("${agenda.prospecting.business-end:18:00}") String businessEnd,
+            @Value("${agenda.prospecting.business-zone:America/Sao_Paulo}") String businessZone,
             @Value("${agenda.cnpj.import-dir:}") String importDir,
             @Value("${agenda.geocoder.provider:mock}") String geocoderProvider,
             @Value("${agenda.geocoder.url:}") String geocoderUrl,
@@ -70,11 +82,19 @@ final class ProspectingSettingsService {
         this.production = production;
         this.enabled = enabled;
         this.dryRun = dryRun;
-        this.radiusKm = Math.max(0.1, Math.min(radiusKm, 2.0));
-        this.perTaskLimit = Math.max(1, Math.min(perTaskLimit, 20));
-        this.dailyLimit = Math.max(1, Math.min(dailyLimit, 1000));
+        this.radiusKm = Math.max(0.1, Math.min(radiusKm, 50.0));
+        this.perTaskLimit = Math.max(5, Math.min(perTaskLimit, 500));
+        this.dailyLimit = Math.max(5, Math.min(dailyLimit, 5000));
         this.cooldownDays = Math.max(1, Math.min(cooldownDays, 3650));
         this.tokenHours = Math.max(1, Math.min(tokenHours, 720));
+        this.contactRoundSize = Math.max(1, Math.min(contactRoundSize, 5));
+        this.responseBusinessHours = Math.max(1, Math.min(responseBusinessHours, 24));
+        this.businessStart = parseTime(businessStart, LocalTime.of(9, 0));
+        this.businessEnd = parseTime(businessEnd, LocalTime.of(18, 0));
+        if (!this.businessEnd.isAfter(this.businessStart)) {
+            throw new IllegalArgumentException("agenda.prospecting.business-end deve ser posterior a business-start.");
+        }
+        this.businessZone = validZone(businessZone, "America/Sao_Paulo");
         this.importDir = importDir == null || importDir.isBlank() ? null : Path.of(importDir).toAbsolutePath().normalize();
         this.geocoderProvider = safe(geocoderProvider, "mock").toLowerCase(Locale.ROOT);
         this.geocoderUrl = safe(geocoderUrl, "");
@@ -99,10 +119,20 @@ final class ProspectingSettingsService {
             triggerMode = "AUTO_IMMEDIATE";
         }
         String municipalities = overrides.getOrDefault("pilot.municipalities", "SOROCABA/SP");
+        int roundSize = parseInt(overrides.get("contact.round_size"), contactRoundSize, 1, 5);
+        int responseHours = parseInt(overrides.get("contact.response_business_hours"), responseBusinessHours, 1, 24);
+        LocalTime roundBusinessStart = parseTime(overrides.get("contact.business_start"), businessStart);
+        LocalTime roundBusinessEnd = parseTime(overrides.get("contact.business_end"), businessEnd);
+        if (!roundBusinessEnd.isAfter(roundBusinessStart)) {
+            roundBusinessStart = businessStart;
+            roundBusinessEnd = businessEnd;
+        }
         return new Snapshot(production, enabled, dryRun, radiusKm, perTaskLimit, dailyLimit,
-                cooldownDays, tokenHours, importDir, geocoderProvider, geocoderUrl, geocoderApiKey,
+                cooldownDays, tokenHours, roundSize, responseHours, roundBusinessStart, roundBusinessEnd, businessZone,
+                importDir, geocoderProvider, geocoderUrl, geocoderApiKey,
                 minConfidence, emailCheckMx, repeatedEmailThreshold, publicWebUrl, triggerMode,
-                municipalities, smtpHost, smtpPort, smtpUsername, smtpPassword, smtpFrom, emailSendingEnabled, automaticDryRunEnabled);
+                municipalities, smtpHost, smtpPort, smtpUsername, smtpPassword, smtpFrom,
+                emailSendingEnabled, automaticDryRunEnabled);
     }
 
     Map<String, Object> adminView() {
@@ -116,6 +146,11 @@ final class ProspectingSettingsService {
         result.put("dailyLimit", value.dailyLimit());
         result.put("cooldownDays", value.cooldownDays());
         result.put("tokenHours", value.tokenHours());
+        result.put("contactRoundSize", value.contactRoundSize());
+        result.put("responseBusinessHours", value.responseBusinessHours());
+        result.put("businessStart", value.businessStart().toString());
+        result.put("businessEnd", value.businessEnd().toString());
+        result.put("businessZone", value.businessZone());
         result.put("importDirectoryConfigured", value.importDir() != null);
         result.put("geocoderProvider", value.geocoderProvider());
         result.put("geocoderUrlConfigured", !value.geocoderUrl().isBlank());
@@ -131,12 +166,15 @@ final class ProspectingSettingsService {
         result.put("automaticDryRunEnabled", value.automaticDryRunEnabled());
         result.put("geocoderProductionReady", value.geocoderProductionReady());
         result.put("realSendingAllowed", value.realSendingAllowed());
-        result.put("warning", "Antes do envio real, configure SPF, DKIM e DMARC, valide o descadastro e defina limites de envio.");
+        result.put("warning", "Cada pedido contata no máximo " + value.contactRoundSize()
+                + " prestadores por rodada. Sem resposta positiva, a próxima rodada é liberada após "
+                + value.responseBusinessHours() + " hora(s) útil(eis).");
         return result;
     }
 
     void updateEditable(String userId, SettingsUpdate update) {
         if (update == null) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Informe as configurações.");
+        Snapshot current = snapshot();
         double confidence = Math.max(0.0, Math.min(update.geocoderMinConfidence(), 1.0));
         String mode = update.triggerMode() == null ? "AUTO_IMMEDIATE" : update.triggerMode().trim().toUpperCase(Locale.ROOT);
         if (!mode.equals("MANUAL") && !mode.equals("AUTO_AFTER_INTERNAL") && !mode.equals("AUTO_IMMEDIATE")) {
@@ -144,6 +182,11 @@ final class ProspectingSettingsService {
         }
         String municipalities = update.pilotMunicipalities() == null ? "" : update.pilotMunicipalities().trim().toUpperCase(Locale.ROOT);
         if (municipalities.isBlank()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Informe ao menos um município piloto.");
+        int roundSize = update.contactRoundSize() == null ? current.contactRoundSize() : Math.max(1, Math.min(update.contactRoundSize(), 5));
+        int responseHours = update.responseBusinessHours() == null ? current.responseBusinessHours() : Math.max(1, Math.min(update.responseBusinessHours(), 24));
+        LocalTime start = parseTime(update.businessStart(), current.businessStart());
+        LocalTime end = parseTime(update.businessEnd(), current.businessEnd());
+        if (!end.isAfter(start)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "O fim do horário útil deve ser posterior ao início.");
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("""
                      INSERT INTO agenda_prospecting_settings(setting_key,setting_value,updated_by,updated_at)
@@ -154,6 +197,10 @@ final class ProspectingSettingsService {
             put(statement, "geocoder.min_confidence", Double.toString(confidence), userId);
             put(statement, "trigger.mode", mode, userId);
             put(statement, "pilot.municipalities", municipalities, userId);
+            put(statement, "contact.round_size", Integer.toString(roundSize), userId);
+            put(statement, "contact.response_business_hours", Integer.toString(responseHours), userId);
+            put(statement, "contact.business_start", start.toString(), userId);
+            put(statement, "contact.business_end", end.toString(), userId);
         } catch (SQLException exception) {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Não foi possível salvar as configurações.", exception);
         }
@@ -183,6 +230,22 @@ final class ProspectingSettingsService {
         catch (Exception ignored) { return fallback; }
     }
 
+    private static int parseInt(String value, int fallback, int min, int max) {
+        try { return Math.max(min, Math.min(Integer.parseInt(value), max)); }
+        catch (Exception ignored) { return fallback; }
+    }
+
+    private static LocalTime parseTime(String value, LocalTime fallback) {
+        try { return value == null || value.isBlank() ? fallback : LocalTime.parse(value.trim()); }
+        catch (Exception ignored) { return fallback; }
+    }
+
+    private static String validZone(String value, String fallback) {
+        String candidate = safe(value, fallback);
+        try { ZoneId.of(candidate); return candidate; }
+        catch (Exception ignored) { return fallback; }
+    }
+
     private static String safe(String value, String fallback) {
         String result = value == null ? "" : value.trim();
         return result.isEmpty() ? fallback : result;
@@ -192,11 +255,14 @@ final class ProspectingSettingsService {
         return value.replaceAll("/+$", "");
     }
 
-    record SettingsUpdate(double geocoderMinConfidence, String triggerMode, String pilotMunicipalities) {}
+    record SettingsUpdate(double geocoderMinConfidence, String triggerMode, String pilotMunicipalities,
+                          Integer contactRoundSize, Integer responseBusinessHours,
+                          String businessStart, String businessEnd) {}
 
     record Snapshot(boolean production, boolean enabled, boolean dryRun, double radiusKm, int perTaskLimit,
-                    int dailyLimit, int cooldownDays, int tokenHours, Path importDir,
-                    String geocoderProvider, String geocoderUrl, String geocoderApiKey,
+                    int dailyLimit, int cooldownDays, int tokenHours, int contactRoundSize,
+                    int responseBusinessHours, LocalTime businessStart, LocalTime businessEnd, String businessZone,
+                    Path importDir, String geocoderProvider, String geocoderUrl, String geocoderApiKey,
                     double minConfidence, boolean emailCheckMx, int repeatedEmailThreshold,
                     String publicWebUrl, String triggerMode, String pilotMunicipalities,
                     String smtpHost, int smtpPort, String smtpUsername, String smtpPassword, String smtpFrom,

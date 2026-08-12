@@ -15,7 +15,7 @@ public final class ProspectingSelfTest {
         require(ProspectingValidation.inRadius(-23.5015, -47.4526, -23.5100, -47.4526, 2), "raio de 2 km");
         List<String> values = new ArrayList<>();
         for (int i = 0; i < 30; i++) values.add("e" + i);
-        require(ProspectingRules.distinctLimited(values, value -> value, 50).size() == 20, "limite de 20");
+        require(ProspectingRules.distinctLimited(values, value -> value, 50).size() == 30, "pool configurável");
         LocalDateTime now = LocalDateTime.of(2026, 8, 3, 12, 0);
         require(ProspectingRules.withinCooldown(now.minusDays(10), 90, now), "cooldown");
         require(!ProspectingRules.tokenUsable("a".repeat(64), now.minusHours(1), now), "token expirado");

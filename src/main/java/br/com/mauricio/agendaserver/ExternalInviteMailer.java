@@ -49,13 +49,13 @@ final class ExternalInviteMailer {
         socket.setSoTimeout((int) Duration.ofSeconds(30).toMillis());
         SmtpChannel channel = new SmtpChannel(socket);
         channel.expect(220);
-        String ehlo = channel.command("EHLO agendaja.local", 250);
+        String ehlo = channel.command("EHLO agendafaz.com.br", 250);
         if (configuration.smtpPort() != 465 && ehlo.toUpperCase().contains("STARTTLS")) {
             channel.command("STARTTLS", 220);
             socket = ((SSLSocketFactory) SSLSocketFactory.getDefault()).createSocket(socket, configuration.smtpHost(), configuration.smtpPort(), true);
             socket.setSoTimeout((int) Duration.ofSeconds(30).toMillis());
             channel = new SmtpChannel(socket);
-            channel.command("EHLO agendaja.local", 250);
+            channel.command("EHLO agendafaz.com.br", 250);
         }
         if (!configuration.smtpUsername().isBlank()) {
             channel.command("AUTH LOGIN", 334);
@@ -66,7 +66,7 @@ final class ExternalInviteMailer {
         channel.command("RCPT TO:<" + destination + ">", 250, 251);
         channel.command("DATA", 354);
         String encodedSubject = "=?UTF-8?B?" + Base64.getEncoder().encodeToString(subject.getBytes(StandardCharsets.UTF_8)) + "?=";
-        String message = "From: AgendaJa <" + configuration.smtpFrom() + ">\r\n"
+        String message = "From: AgendaFz <" + configuration.smtpFrom() + ">\r\n"
                 + "To: <" + destination + ">\r\n"
                 + "Subject: " + encodedSubject + "\r\n"
                 + "MIME-Version: 1.0\r\n"
@@ -86,11 +86,12 @@ final class ExternalInviteMailer {
                 + "Existe uma solicitação de serviço de " + specialty + " na região de " + region
                 + ", a aproximadamente " + String.format(java.util.Locale.US, "%.1f", distanceKm).replace('.', ',') + " km do seu estabelecimento."
                 + dateText + "\n\n"
-                + "Encontramos este contato público no cadastro público do CNPJ. Caso tenha interesse, você pode criar gratuitamente seu perfil no AgendaJá e conhecer a oportunidade. O cadastro e a participação são opcionais; não há promessa de contratação ou renda.\n\n"
+                + "Encontramos este contato público no cadastro público do CNPJ. Caso tenha interesse, você pode criar gratuitamente seu perfil no AgendaFz e conhecer a oportunidade. O cadastro e a participação são opcionais; não há promessa de contratação ou renda.\n\n"
                 + "Para que o sistema associe corretamente esta demanda, mantenha o e-mail " + email + " no cadastro.\n\n"
                 + "Conhecer a oportunidade: " + inviteLink + "\n\n"
                 + "Se não quiser receber novos convites, confirme o descadastro aqui: " + optOutLink + "\n\n"
-                + "AgendaJá";
+                + "AgendaFz — Você agenda. A gente faz acontecer.\n"
+                + "agendafaz.com.br";
     }
 
     private static String headerValue(String value, int max) {

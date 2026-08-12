@@ -10,7 +10,7 @@ final class ProspectingRules {
     private ProspectingRules() {}
 
     static int perTaskLimit(int configured) {
-        return Math.max(1, Math.min(configured, 20));
+        return Math.max(1, Math.min(configured, 500));
     }
 
     static int dailyAllowance(int alreadySent, int configuredLimit) {

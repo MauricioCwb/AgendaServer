@@ -61,6 +61,11 @@ final class CnpjImportService {
         if (!crypto.configured()) {
             throw badRequest("Configure AGENDA_PROSPECT_DATA_KEY antes de importar contatos.");
         }
+        String requestedMode = request == null ? null : request.mode();
+        if (requestedMode != null && !requestedMode.isBlank() && !ImportMode.isValid(requestedMode)) {
+            throw badRequest("Modo de importação inválido. Use FULL_CATALOG ou PROSPECTING_ONLY.");
+        }
+        ImportMode importMode = ImportMode.parse(requestedMode);
         String sourceVersion = request == null || request.sourceVersion() == null
                 ? "" : request.sourceVersion().trim();
         if (sourceVersion.isBlank() || sourceVersion.length() > 80) {
@@ -70,14 +75,15 @@ final class CnpjImportService {
         String id = UUID.randomUUID().toString();
         try (Connection connection = dataSource.getConnection();
              PreparedStatement insert = connection.prepareStatement("""
-                     INSERT INTO agenda_cnpj_import_runs(id,status,source_version,source_date,import_directory,requested_by)
-                     VALUES(?,'PENDING',?,?,?,?)
+                     INSERT INTO agenda_cnpj_import_runs(id,status,source_version,source_date,import_directory,requested_by,import_mode)
+                     VALUES(?,'PENDING',?,?,?,?,?)
                      """)) {
             insert.setString(1, id);
             insert.setString(2, sourceVersion);
             if (sourceDate == null) insert.setNull(3, java.sql.Types.DATE); else insert.setDate(3, Date.valueOf(sourceDate));
             insert.setString(4, configuration.importDir().toString());
             insert.setString(5, userId);
+            insert.setString(6, importMode.name());
             insert.executeUpdate();
             return run(id);
         } catch (SQLException exception) {
@@ -120,7 +126,7 @@ final class CnpjImportService {
     List<ImportRun> list() {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement query = connection.prepareStatement("""
-                     SELECT id,status,source_version,source_date,current_file,checkpoint_line,files_total,files_processed,
+                     SELECT id,status,source_version,source_date,import_mode,current_file,checkpoint_line,files_total,files_processed,
                        records_read,records_imported,records_rejected,last_error,created_at,started_at,completed_at
                      FROM agenda_cnpj_import_runs ORDER BY created_at DESC LIMIT 100
                      """)) {
@@ -137,7 +143,7 @@ final class CnpjImportService {
     ImportRun run(String id) {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement query = connection.prepareStatement("""
-                     SELECT id,status,source_version,source_date,current_file,checkpoint_line,files_total,files_processed,
+                     SELECT id,status,source_version,source_date,import_mode,current_file,checkpoint_line,files_total,files_processed,
                        records_read,records_imported,records_rejected,last_error,created_at,started_at,completed_at
                      FROM agenda_cnpj_import_runs WHERE id=?
                      """)) {
@@ -206,7 +212,9 @@ final class CnpjImportService {
         }
         try {
             Set<String> activeCnaes = specialties.activeCnaeCodes();
-            if (activeCnaes.isEmpty()) throw new IllegalStateException("Cadastre CNAEs ativos antes da importação.");
+            if (context.mode() == ImportMode.PROSPECTING_ONLY && activeCnaes.isEmpty()) {
+                throw new IllegalStateException("Cadastre CNAEs ativos antes da importação de prospecção.");
+            }
             Map<String, String> municipalities = readMunicipalities(directory);
             Set<String> pilot = pilotMunicipalities(configuration.pilotMunicipalities());
             List<Path> files = establishmentFiles(directory);
@@ -228,6 +236,7 @@ final class CnpjImportService {
             }
             markRepeatedEmails(configuration.repeatedEmailThreshold());
             deactivateStaleProspects(context.sourceVersion(), pilot);
+            if (context.mode() == ImportMode.FULL_CATALOG) markCatalogSourceCurrent(context.sourceVersion());
             complete(id);
         } catch (Exception exception) {
             if (!isCancelled(id)) fail(id, safeMessage(exception));
@@ -250,21 +259,36 @@ final class CnpjImportService {
                     Map<String, Long> rejections = new LinkedHashMap<>();
                     Connection connection = dataSource.getConnection();
                     connection.setAutoCommit(false);
-                    try {
+                    try (CatalogBatchWriter catalogWriter = context.mode() == ImportMode.FULL_CATALOG
+                            ? new CatalogBatchWriter(connection, context) : null) {
                         List<String> record;
                         while ((record = parser.next()) != null) {
                             line++;
                             if (line <= checkpoint) continue;
-                            ImportDecision decision = inspect(record, municipalities, pilot, activeCnaes, checkMx);
-                            if (!decision.accepted()) {
-                                rejections.merge(decision.reason(), 1L, Long::sum);
-                                batchRejected++;
+                            if (context.mode() == ImportMode.FULL_CATALOG) {
+                                CatalogDecision catalog = inspectCatalog(record, municipalities);
+                                if (!catalog.accepted()) {
+                                    rejections.merge(catalog.reason(), 1L, Long::sum);
+                                    batchRejected++;
+                                } else {
+                                    catalogWriter.add(catalog);
+                                    batchImported++;
+                                    ImportDecision prospect = inspectProspect(catalog, pilot, activeCnaes, checkMx);
+                                    if (prospect.accepted()) upsertProspect(connection, context, prospect);
+                                }
                             } else {
-                                upsertProspect(connection, context, decision);
-                                batchImported++;
+                                ImportDecision decision = inspect(record, municipalities, pilot, activeCnaes, checkMx);
+                                if (!decision.accepted()) {
+                                    rejections.merge(decision.reason(), 1L, Long::sum);
+                                    batchRejected++;
+                                } else {
+                                    upsertProspect(connection, context, decision);
+                                    batchImported++;
+                                }
                             }
                             batchRead++;
                             if (batchRead >= BATCH_SIZE) {
+                                if (catalogWriter != null) catalogWriter.flush();
                                 updateProgress(connection, runId, file.getFileName().toString(), line, batchRead,
                                         batchImported, batchRejected, rejections);
                                 connection.commit();
@@ -275,6 +299,7 @@ final class CnpjImportService {
                                 batchRejected = 0;
                             }
                         }
+                        if (catalogWriter != null) catalogWriter.flush();
                         if (batchRead > 0 || !rejections.isEmpty()) {
                             updateProgress(connection, runId, file.getFileName().toString(), line, batchRead,
                                     batchImported, batchRejected, rejections);
@@ -293,32 +318,54 @@ final class CnpjImportService {
         }
     }
 
-    private ImportDecision inspect(List<String> row, Map<String, String> municipalities, Set<String> pilot,
-                                   Set<String> activeCnaes, boolean checkMx) {
-        if (row.size() < 28) return ImportDecision.reject("ROW_INVALID");
-        String status = value(row, 5);
-        if (!"02".equals(status)) return ImportDecision.reject("STATUS_NOT_ACTIVE");
-        String municipalityCode = value(row, 20);
-        String municipality = municipalities.getOrDefault(municipalityCode, "").trim().toUpperCase(Locale.ROOT);
-        String uf = value(row, 19).toUpperCase(Locale.ROOT);
-        if (municipality.isBlank() || !pilot.contains(municipality + "/" + uf)) return ImportDecision.reject("MUNICIPALITY_OUTSIDE_PILOT");
+    static CatalogDecision inspectCatalog(List<String> row, Map<String, String> municipalities) {
+        if (row.size() < 28) return CatalogDecision.reject("ROW_INVALID");
+        String cnpj = ProspectingValidation.normalizeCnpj(value(row, 0) + value(row, 1) + value(row, 2));
+        if (cnpj.isBlank()) return CatalogDecision.reject("CNPJ_INVALID");
+        String status = clean(value(row, 5), 8);
+        String municipalityCode = clean(value(row, 20), 12);
+        String municipality = clean(municipalities.getOrDefault(municipalityCode, ""), 120).toUpperCase(Locale.ROOT);
+        String uf = clean(value(row, 19), 2).toUpperCase(Locale.ROOT);
         String primary = ProspectingValidation.normalizeCnae(value(row, 11));
-        List<String> secondary = splitCnaes(value(row, 12));
-        List<CnaeValue> matches = new ArrayList<>();
-        if (activeCnaes.contains(primary)) matches.add(new CnaeValue(primary, true));
-        for (String code : secondary) if (activeCnaes.contains(code) && !code.equals(primary)) matches.add(new CnaeValue(code, false));
-        if (matches.isEmpty()) return ImportDecision.reject("CNAE_NOT_MAPPED");
-        ProspectingValidation.EmailValidation email = ProspectingValidation.validateEmail(value(row, 27), checkMx);
-        if (!email.valid()) return ImportDecision.reject(email.reason());
+        List<CnaeValue> cnaes = new ArrayList<>();
+        if (!primary.isBlank()) cnaes.add(new CnaeValue(primary, true));
+        for (String code : splitCnaes(value(row, 12))) {
+            if (!code.equals(primary)) cnaes.add(new CnaeValue(code, false));
+        }
+        ProspectingValidation.EmailValidation emailValidation = ProspectingValidation.validateEmail(value(row, 27), false);
+        String email = emailValidation.valid() ? emailValidation.normalized() : "";
+        String emailDomain = emailValidation.valid() ? emailValidation.domain() : "";
         String cep = ProspectingValidation.normalizeCep(value(row, 18));
         String address = ProspectingValidation.normalizeAddress(value(row, 13), value(row, 14), value(row, 15),
                 value(row, 16), value(row, 17), cep, municipality, uf);
-        if (!ProspectingValidation.validAddress(address, cep, municipality, uf)) return ImportDecision.reject("ADDRESS_INVALID");
-        String cnpj = ProspectingValidation.normalizeCnpj(value(row, 0) + value(row, 1) + value(row, 2));
-        if (cnpj.isBlank()) return ImportDecision.reject("CNPJ_INVALID");
-        String tradeName = clean(value(row, 4), 250);
-        return ImportDecision.accept(cnpj, "", tradeName, status,
-                municipalityCode, municipality, uf, primary, email.normalized(), email.domain(), address, cep, matches);
+        return CatalogDecision.accept(cnpj, clean(value(row, 4), 250), status, municipalityCode,
+                municipality, uf, primary, email, emailDomain, address, cep, cnaes);
+    }
+
+    private ImportDecision inspectProspect(CatalogDecision catalog, Set<String> pilot,
+                                           Set<String> activeCnaes, boolean checkMx) {
+        if (!"02".equals(catalog.status())) return ImportDecision.reject("STATUS_NOT_ACTIVE");
+        if (catalog.municipality().isBlank() || !pilot.contains(catalog.municipality() + "/" + catalog.uf())) {
+            return ImportDecision.reject("MUNICIPALITY_OUTSIDE_PILOT");
+        }
+        List<CnaeValue> matches = new ArrayList<>();
+        for (CnaeValue cnae : catalog.cnaes()) if (activeCnaes.contains(cnae.code())) matches.add(cnae);
+        if (matches.isEmpty()) return ImportDecision.reject("CNAE_NOT_MAPPED");
+        ProspectingValidation.EmailValidation email = ProspectingValidation.validateEmail(catalog.email(), checkMx);
+        if (!email.valid()) return ImportDecision.reject(email.reason());
+        if (!ProspectingValidation.validAddress(catalog.address(), catalog.cep(), catalog.municipality(), catalog.uf())) {
+            return ImportDecision.reject("ADDRESS_INVALID");
+        }
+        return ImportDecision.accept(catalog.cnpj(), "", catalog.tradeName(), catalog.status(),
+                catalog.municipalityCode(), catalog.municipality(), catalog.uf(), catalog.primaryCnae(),
+                email.normalized(), email.domain(), catalog.address(), catalog.cep(), matches);
+    }
+
+    private ImportDecision inspect(List<String> row, Map<String, String> municipalities, Set<String> pilot,
+                                   Set<String> activeCnaes, boolean checkMx) {
+        CatalogDecision catalog = inspectCatalog(row, municipalities);
+        if (!catalog.accepted()) return ImportDecision.reject(catalog.reason());
+        return inspectProspect(catalog, pilot, activeCnaes, checkMx);
     }
 
     private long upsertProspect(Connection connection, ImportContext context, ImportDecision value) throws SQLException {
@@ -490,10 +537,23 @@ final class CnpjImportService {
         }
     }
 
+    private void markCatalogSourceCurrent(String sourceVersion) throws SQLException {
+        if (sourceVersion == null || sourceVersion.isBlank()) return;
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement update = connection.prepareStatement("""
+                     UPDATE agenda_cnpj_catalog SET source_current=(source_version=?),updated_at=CURRENT_TIMESTAMP
+                     WHERE source_current=TRUE OR source_version=?
+                     """)) {
+            update.setString(1, sourceVersion);
+            update.setString(2, sourceVersion);
+            update.executeUpdate();
+        }
+    }
+
     private ImportContext loadContext(String id) {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement query = connection.prepareStatement("""
-                     SELECT source_version,source_date,current_file,checkpoint_line,files_processed
+                     SELECT source_version,source_date,import_mode,current_file,checkpoint_line,files_processed
                      FROM agenda_cnpj_import_runs WHERE id=?
                      """)) {
             query.setString(1, id);
@@ -501,7 +561,7 @@ final class CnpjImportService {
                 if (!rows.next()) throw new IllegalStateException("Importação não encontrada.");
                 Date date = rows.getDate(2);
                 return new ImportContext(rows.getString(1), date == null ? null : date.toLocalDate(),
-                        rows.getString(3), rows.getLong(4), rows.getInt(5));
+                        ImportMode.parse(rows.getString(3)), rows.getString(4), rows.getLong(5), rows.getInt(6));
             }
         } catch (SQLException exception) {
             throw new IllegalStateException("Não foi possível carregar o contexto da importação.", exception);
@@ -576,7 +636,7 @@ final class CnpjImportService {
     private static ImportRun map(ResultSet rows) throws SQLException {
         Date sourceDate = rows.getDate("source_date");
         return new ImportRun(rows.getString("id"), rows.getString("status"), rows.getString("source_version"),
-                sourceDate == null ? null : sourceDate.toLocalDate(), basename(rows.getString("current_file")),
+                sourceDate == null ? null : sourceDate.toLocalDate(), rows.getString("import_mode"), basename(rows.getString("current_file")),
                 rows.getLong("checkpoint_line"), rows.getInt("files_total"), rows.getInt("files_processed"),
                 rows.getLong("records_read"), rows.getLong("records_imported"), rows.getLong("records_rejected"),
                 rows.getString("last_error"), timestamp(rows, "created_at"), timestamp(rows, "started_at"), timestamp(rows, "completed_at"));
@@ -626,14 +686,28 @@ final class CnpjImportService {
         return new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, message, exception);
     }
 
-    record ImportRequest(String sourceVersion, LocalDate sourceDate) {}
-    record ImportRun(String id, String status, String sourceVersion, LocalDate sourceDate, String currentFile,
+    record ImportRequest(String sourceVersion, LocalDate sourceDate, String mode) {}
+    record ImportRun(String id, String status, String sourceVersion, LocalDate sourceDate, String mode, String currentFile,
                      long checkpointLine, int filesTotal, int filesProcessed, long recordsRead,
                      long recordsImported, long recordsRejected, String lastError,
                      String createdAt, String startedAt, String completedAt) {}
-    private record ImportContext(String sourceVersion, LocalDate sourceDate, String currentFile,
+    private record ImportContext(String sourceVersion, LocalDate sourceDate, ImportMode mode, String currentFile,
                                  long checkpointLine, int filesProcessed) {}
-    private record CnaeValue(String code, boolean primary) {}
+    record CnaeValue(String code, boolean primary) {}
+    record CatalogDecision(boolean accepted, String reason, String cnpj, String tradeName, String status,
+                                   String municipalityCode, String municipality, String uf, String primaryCnae,
+                                   String email, String emailDomain, String address, String cep, List<CnaeValue> cnaes) {
+        static CatalogDecision reject(String reason) {
+            return new CatalogDecision(false, reason, "", "", "", "", "", "", "", "", "", "", "", List.of());
+        }
+        static CatalogDecision accept(String cnpj, String tradeName, String status, String municipalityCode,
+                                      String municipality, String uf, String primaryCnae, String email,
+                                      String emailDomain, String address, String cep, List<CnaeValue> cnaes) {
+            return new CatalogDecision(true, "", cnpj, tradeName, status, municipalityCode, municipality, uf,
+                    primaryCnae, email, emailDomain, address, cep, List.copyOf(cnaes));
+        }
+    }
+
     private record ImportDecision(boolean accepted, String reason, String cnpj, String legalName, String tradeName,
                                   String status, String municipalityCode, String municipality, String uf,
                                   String primaryCnae, String email, String emailDomain, String address,
@@ -646,6 +720,102 @@ final class CnpjImportService {
                                      String email, String emailDomain, String address, String cep, List<CnaeValue> cnaes) {
             return new ImportDecision(true, "", cnpj, legalName, tradeName, status, municipalityCode,
                     municipality, uf, primaryCnae, email, emailDomain, address, cep, List.copyOf(cnaes));
+        }
+    }
+
+    private final class CatalogBatchWriter implements AutoCloseable {
+        private final ImportContext context;
+        private final PreparedStatement upsert;
+        private final PreparedStatement deleteCnaes;
+        private final PreparedStatement insertCnaes;
+        private int pending;
+
+        CatalogBatchWriter(Connection connection, ImportContext context) throws SQLException {
+            this.context = context;
+            this.upsert = connection.prepareStatement("""
+                    INSERT INTO agenda_cnpj_catalog(cnpj,trade_name,registration_status,municipality_code,municipality_name,
+                      uf,cnae_primary,email_hash,email_ciphertext,email_domain,email_quality_status,address_normalized,
+                      address_hash,cep,source_version,source_date,source_current,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,TRUE,CURRENT_TIMESTAMP)
+                    ON CONFLICT(cnpj) DO UPDATE SET trade_name=EXCLUDED.trade_name,
+                      registration_status=EXCLUDED.registration_status,municipality_code=EXCLUDED.municipality_code,
+                      municipality_name=EXCLUDED.municipality_name,uf=EXCLUDED.uf,cnae_primary=EXCLUDED.cnae_primary,
+                      email_hash=EXCLUDED.email_hash,email_ciphertext=EXCLUDED.email_ciphertext,
+                      email_domain=EXCLUDED.email_domain,email_quality_status=EXCLUDED.email_quality_status,
+                      address_normalized=EXCLUDED.address_normalized,address_hash=EXCLUDED.address_hash,cep=EXCLUDED.cep,
+                      source_version=EXCLUDED.source_version,source_date=EXCLUDED.source_date,source_current=TRUE,
+                      updated_at=CURRENT_TIMESTAMP
+                    """);
+            this.deleteCnaes = connection.prepareStatement("DELETE FROM agenda_cnpj_catalog_cnaes WHERE cnpj=?");
+            this.insertCnaes = connection.prepareStatement("""
+                    INSERT INTO agenda_cnpj_catalog_cnaes(cnpj,cnae_code,primary_cnae) VALUES(?,?,?)
+                    ON CONFLICT(cnpj,cnae_code) DO UPDATE SET primary_cnae=EXCLUDED.primary_cnae
+                    """);
+        }
+
+        void add(CatalogDecision value) throws SQLException {
+            String emailHash = value.email().isBlank() ? "" : ProspectingValidation.sha256(value.email());
+            String emailCiphertext = value.email().isBlank() ? "" : crypto.encrypt(value.email());
+            String addressHash = value.address().isBlank() ? "" : ProspectingValidation.sha256(value.address());
+            int index = 1;
+            upsert.setString(index++, value.cnpj());
+            upsert.setString(index++, value.tradeName());
+            upsert.setString(index++, value.status());
+            upsert.setString(index++, value.municipalityCode());
+            upsert.setString(index++, value.municipality());
+            upsert.setString(index++, value.uf());
+            upsert.setString(index++, value.primaryCnae());
+            upsert.setString(index++, emailHash);
+            upsert.setString(index++, emailCiphertext);
+            upsert.setString(index++, value.emailDomain());
+            upsert.setString(index++, value.email().isBlank() ? "UNAVAILABLE" : "VALID");
+            upsert.setString(index++, value.address());
+            upsert.setString(index++, addressHash);
+            upsert.setString(index++, value.cep());
+            upsert.setString(index++, context.sourceVersion());
+            if (context.sourceDate() == null) upsert.setNull(index, java.sql.Types.DATE);
+            else upsert.setDate(index, Date.valueOf(context.sourceDate()));
+            upsert.addBatch();
+
+            deleteCnaes.setString(1, value.cnpj());
+            deleteCnaes.addBatch();
+            for (CnaeValue cnae : value.cnaes()) {
+                insertCnaes.setString(1, value.cnpj());
+                insertCnaes.setString(2, cnae.code());
+                insertCnaes.setBoolean(3, cnae.primary());
+                insertCnaes.addBatch();
+            }
+            pending++;
+        }
+
+        void flush() throws SQLException {
+            if (pending == 0) return;
+            upsert.executeBatch();
+            deleteCnaes.executeBatch();
+            insertCnaes.executeBatch();
+            pending = 0;
+        }
+
+        @Override
+        public void close() throws SQLException {
+            upsert.close();
+            deleteCnaes.close();
+            insertCnaes.close();
+        }
+    }
+
+    enum ImportMode {
+        PROSPECTING_ONLY, FULL_CATALOG;
+
+        static boolean isValid(String value) {
+            if (value == null || value.isBlank()) return true;
+            try { ImportMode.valueOf(value.trim().toUpperCase(Locale.ROOT)); return true; }
+            catch (Exception ignored) { return false; }
+        }
+
+        static ImportMode parse(String value) {
+            if (value == null || value.isBlank()) return FULL_CATALOG;
+            return ImportMode.valueOf(value.trim().toUpperCase(Locale.ROOT));
         }
     }
 
