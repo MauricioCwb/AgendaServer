@@ -37,7 +37,7 @@ set "AGENDA_GEOCODER_API_KEY="
 rem Opcional: se vazio, o servidor cria uma chave persistente fora do Git.
 set "AGENDA_PROSPECT_DATA_KEY="
 set "AGENDA_PROSPECT_KEY_FILE=%USERPROFILE%\appdata\agenda\prospecting.key"
-set "AGENDA_PUBLIC_WEB_URL=http://127.0.0.1:5500"
+set "AGENDA_PUBLIC_WEB_URL=https://agendafaz.com.br"
 set "AGENDA_SMTP_HOST="
 set "AGENDA_SMTP_PORT=587"
 set "AGENDA_SMTP_USERNAME="

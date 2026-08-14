@@ -438,7 +438,7 @@ final class ProspectingService {
             try (ResultSet rows = query.executeQuery()) {
                 if (!rows.next()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Link de descadastro inválido.");
                 return new OptOutContext(maskEmail(crypto.decrypt(rows.getString("email_ciphertext"))),
-                        "Confirme para não receber novos convites do AgendaFz.");
+                        "Confirme para não receber novos convites do AgendaFaz.");
             }
         } catch (ResponseStatusException exception) {
             throw exception;

@@ -200,7 +200,7 @@ http://127.0.0.1:28212/api/agenda/health
 | `AGENDA_EXTERNAL_INVITE_COOLDOWN_DAYS` | `90` |
 | `AGENDA_EXTERNAL_INVITE_TOKEN_HOURS` | `72` |
 | `AGENDA_PROSPECT_DATA_KEY` | vazio |
-| `AGENDA_PUBLIC_WEB_URL` | `http://127.0.0.1:5500` |
+| `AGENDA_PUBLIC_WEB_URL` | `https://agendafaz.com.br` |
 
 `AGENDA_PROSPECT_DATA_KEY` deve ser Base64 de exatamente 32 bytes. Gere localmente no PowerShell:
 

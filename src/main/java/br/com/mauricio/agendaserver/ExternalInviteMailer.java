@@ -66,7 +66,7 @@ final class ExternalInviteMailer {
         channel.command("RCPT TO:<" + destination + ">", 250, 251);
         channel.command("DATA", 354);
         String encodedSubject = "=?UTF-8?B?" + Base64.getEncoder().encodeToString(subject.getBytes(StandardCharsets.UTF_8)) + "?=";
-        String message = "From: AgendaFz <" + configuration.smtpFrom() + ">\r\n"
+        String message = "From: AgendaFaz <" + configuration.smtpFrom() + ">\r\n"
                 + "To: <" + destination + ">\r\n"
                 + "Subject: " + encodedSubject + "\r\n"
                 + "MIME-Version: 1.0\r\n"
@@ -86,11 +86,11 @@ final class ExternalInviteMailer {
                 + "Existe uma solicitação de serviço de " + specialty + " na região de " + region
                 + ", a aproximadamente " + String.format(java.util.Locale.US, "%.1f", distanceKm).replace('.', ',') + " km do seu estabelecimento."
                 + dateText + "\n\n"
-                + "Encontramos este contato público no cadastro público do CNPJ. Caso tenha interesse, você pode criar gratuitamente seu perfil no AgendaFz e conhecer a oportunidade. O cadastro e a participação são opcionais; não há promessa de contratação ou renda.\n\n"
+                + "Encontramos este contato público no cadastro público do CNPJ. Caso tenha interesse, você pode criar gratuitamente seu perfil no AgendaFaz e conhecer a oportunidade. O cadastro e a participação são opcionais; não há promessa de contratação ou renda.\n\n"
                 + "Para que o sistema associe corretamente esta demanda, mantenha o e-mail " + email + " no cadastro.\n\n"
                 + "Conhecer a oportunidade: " + inviteLink + "\n\n"
                 + "Se não quiser receber novos convites, confirme o descadastro aqui: " + optOutLink + "\n\n"
-                + "AgendaFz — Você agenda. A gente faz acontecer.\n"
+                + "AgendaFaz — Você agenda. A gente faz acontecer.\n"
                 + "agendafaz.com.br";
     }
 
