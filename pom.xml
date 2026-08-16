@@ -97,6 +97,7 @@
                         <configuration>
                             <includes>
                                 <include>**/AgendaFullLifecycleIT.java</include>
+                                <include>**/AgendaAllCasesLifecycleIT.java</include>
                             </includes>
                         </configuration>
                         <executions>
